@@ -1,0 +1,93 @@
+services:
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: temporal
+      POSTGRES_PASSWORD: temporal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  temporal:
+    image: temporalio/auto-setup:latest
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB: postgresql
+      DB_PORT: 5432
+      POSTGRES_SEEDS: postgres
+      POSTGRES_USER: temporal
+      POSTGRES_PWD: temporal
+      POSTGRES_DB: temporal
+      DYNAMIC_CONFIG_FILE_PATH: /etc/temporal/dynamicconfig/temporal.yaml
+    ports:
+      - "7233:7233"
+    volumes:
+      - ./temporal/dynamicconfig:/etc/temporal/dynamicconfig
+
+  temporal-ui:
+    image: temporalio/ui:latest
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+    ports:
+      - "8233:8080"
+
+  http:
+    build:
+      context: .
+      target: http       # 👈 ensure the HTTP stage runs
+    environment:
+      DB_PATH: /app/data/tropes.db
+      EVENT_SINK: webhook
+      EVENT_WEBHOOK_URL: http://host.docker.internal:9090/events
+      INBOX: /app/inbox
+      SUCCESS_DIR: /app/success
+      FAIL_DIR: /app/fail
+    volumes:
+      - ./data:/app/data
+      - ./inbox:/app/inbox
+      - ./success:/app/success
+      - ./fail:/app/fail
+    ports:
+      - "8099:8099"
+    restart: unless-stopped
+
+  watcher:
+    build:
+      context: .
+      target: watcher    # 👈 ensure the watcher stage runs
+    environment:
+      DB_PATH: /app/data/tropes.db
+      EVENT_SINK: webhook
+      EVENT_WEBHOOK_URL: http://host.docker.internal:9090/events
+      INBOX: /app/inbox
+      SUCCESS_DIR: /app/success
+      FAIL_DIR: /app/fail
+      ALLOWED_EXT: ".txt,.md,.pdf,.docx"
+      MAX_FILE_MB: "20"
+    volumes:
+      - ./data:/app/data
+      - ./inbox:/app/inbox
+      - ./success:/app/success
+      - ./fail:/app/fail
+    restart: unless-stopped
+
+  # optional: only run if you actually want the Temporal worker in Docker
+  worker:
+    build:
+      context: .
+      target: worker     # 👈 worker stage
+    environment:
+      DB_PATH: /app/data/tropes.db
+      TEMPORAL_TARGET: host.docker.internal:7233
+      TEMPORAL_NAMESPACE: default
+      INGEST_TASK_QUEUE: ingest-queue
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+

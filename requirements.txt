@@ -1,0 +1,27 @@
+# core
+fastapi>=0.111
+uvicorn[standard]>=0.30
+pydantic>=2.7
+watchdog>=4.0
+typer>=0.12
+
+# parsers (optional but recommended)
+pypdf>=4.2
+docx2txt>=0.8
+chardet>=5.2
+
+# tests
+pytest>=8.2
+requests>=2.32
+
+httpx>=0.27           # for webhook sink
+redis>=5              # for Redis sink (optional)
+nats-py>=2.7          # for NATS sink (optional)
+
+temporalio>=1.7
+python-multipart>=0.0.9
+
+httpx>=0.27
+redis>=5
+nats-py>=2.7
+python-multipart>=0.0.9   # already added for file uploads

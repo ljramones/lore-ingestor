@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lore-ingest"
+version = "0.1.0"
+description = "Lore Ingestor — ingestion service + CLI"
+readme = "Readme.md"
+requires-python = ">=3.10"
+
+
+# If you’d like pip to install runtime deps too, you can mirror requirements.txt here.
+# For now we keep it empty because you've already installed requirements.txt.
+dependencies = []
+
+[project.scripts]
+# Typer app wrapper we added via main()
+lore-ingest = "cli.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["lore_ingest", "service", "cli"]

@@ -1,0 +1,10 @@
+.git
+__pycache__/
+*.pyc
+tests/
+*.db
+data/
+inbox/
+success/
+fail/
+.env
