@@ -15,8 +15,8 @@ from lore_ingest.persist import (
     ensure_ingest_columns_and_tables,
     find_existing_work_by_digest_or_text,
     persist_work_and_children,
+    replace_scenes_and_chunks,
 )
-# parse_file returns a ParseResult object with .raw, .text, .meta
 from lore_ingest.parsers import parse_path as parse_file, available_parsers  # noqa: F401
 
 
@@ -27,9 +27,15 @@ class IngestResult:
     sizes: Dict[str, int]
 
 
-def compute_sha1(raw: bytes) -> str:
-    h = hashlib.sha1()
-    h.update(raw)
+@dataclass
+class ResegmentResult:
+    work_id: str
+    sizes: Dict[str, int]
+    profile: Optional[str]
+
+
+def _sha1(raw: bytes) -> str:
+    h = hashlib.sha1(); h.update(raw)
     return h.hexdigest()
 
 
@@ -52,34 +58,25 @@ def ingest_file(
     run_params: Optional[Dict] = None,
     profile: Optional[str] = None,
 ) -> IngestResult:
-    """
-    Ingest a single file path into the DB. Idempotent via content_sha1 of raw bytes.
-    """
-    # Parse file -> ParseResult(raw, text, meta)
+    """Initial ingest from a file path. Idempotent by raw-bytes SHA1."""
     pr = parse_file(Path(path))
     raw: bytes = pr.raw
     extracted: str = pr.text
     meta: Dict = getattr(pr, "meta", {}) or {}
 
-    content_sha1 = compute_sha1(raw)
-
-    # Normalize
+    content_sha1 = _sha1(raw)
     norm = normalize_text(extracted)
 
-    # DB setup
     conn = open_db(db_path)
     ensure_ingest_columns_and_tables(conn)
 
-    # Idempotency: skip if same digest already exists
     existing = find_existing_work_by_digest_or_text(conn, content_sha1=content_sha1, norm_text=None)
     if existing:
         return IngestResult(work_id=existing, content_sha1=content_sha1, sizes=_sizes_for_work(conn, existing))
 
-    # Segment + chunk (profile-aware)
     scenes = segment_to_scenes(norm, profile=profile)
     chunks = make_chunks(norm, scenes, window_chars=window_chars, stride_chars=stride_chars, profile=profile)
 
-    # Persist
     run_meta = {
         "profile": profile or "default",
         "parser": meta.get("parser"),
@@ -102,14 +99,42 @@ def ingest_file(
         content_sha1=content_sha1,
         run_params=run_meta,
     )
-
     sizes = {"chars": len(norm), "scenes": len(scenes), "chunks": len(chunks)}
     return IngestResult(work_id=work_id, content_sha1=content_sha1, sizes=sizes)
 
 
+def resegment_work(
+    *,
+    work_id: str,
+    db_path: str = "./tropes.db",
+    profile: Optional[str] = None,
+    window_chars: int = 512,
+    stride_chars: int = 384,
+) -> ResegmentResult:
+    """
+    Rebuild scenes/chunks for an existing work without changing norm_text/raw_text.
+    """
+    conn = open_db(db_path)
+    ensure_ingest_columns_and_tables(conn)
+
+    row = conn.execute("SELECT id, norm_text FROM work WHERE id = ?", (work_id,)).fetchone()
+    if not row:
+        raise ValueError(f"Unknown work_id: {work_id}")
+    norm = row["norm_text"] or ""
+
+    scenes = segment_to_scenes(norm, profile=profile)
+    chunks = make_chunks(norm, scenes, window_chars=window_chars, stride_chars=stride_chars, profile=profile)
+
+    replace_scenes_and_chunks(conn, work_id=work_id, norm_text=norm, scenes=scenes, chunks=chunks)
+
+    sizes = {"chars": len(norm), "scenes": len(scenes), "chunks": len(chunks)}
+    return ResegmentResult(work_id=work_id, sizes=sizes, profile=profile)
+
+
 __all__ = [
     "ingest_file",
+    "resegment_work",
     "IngestResult",
+    "ResegmentResult",
     "available_parsers",
 ]
-

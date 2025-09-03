@@ -22,6 +22,8 @@ temporalio>=1.7
 python-multipart>=0.0.9
 
 httpx>=0.27
-redis>=5
+redis>=5.0
 nats-py>=2.7
 python-multipart>=0.0.9   # already added for file uploads
+
+prometheus_client>=0.20

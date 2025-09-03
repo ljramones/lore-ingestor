@@ -21,7 +21,7 @@ COPY lore_ingest/ /app/lore_ingest/
 COPY service/     /app/service/
 COPY cli/         /app/cli/
 COPY pyproject.toml /app/
-COPY Readme.md      /app/
+COPY thoughts.md      /app/
 COPY docs/          /app/docs/
 
 # Runtime env + dirs

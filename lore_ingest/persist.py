@@ -7,6 +7,7 @@ import uuid
 import hashlib
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
+
 # --- Connection helper -----------------------------------------------------
 
 def open_db(db_path: str, *, check_same_thread: bool = False) -> sqlite3.Connection:
@@ -102,10 +103,7 @@ def ensure_ingest_columns_and_tables(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE work ADD COLUMN char_count INTEGER")
 
     # Idempotency: enforce uniqueness on content_sha1 (NULLs allowed)
-    conn.execute(
-        "CREATE UNIQUE INDEX IF NOT EXISTS uniq_work_content_sha1 ON work(content_sha1)"
-    )
-
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS uniq_work_content_sha1 ON work(content_sha1)")
     conn.commit()
 
 
@@ -158,7 +156,7 @@ def _slice_safe(text: str, start: int, end: int) -> str:
     return text[s:e]
 
 
-# --- Persistence -----------------------------------------------------------
+# --- Initial ingest --------------------------------------------------------
 
 def persist_work_and_children(
     conn: sqlite3.Connection,
@@ -244,7 +242,7 @@ def persist_work_and_children(
     chunks_raw = list(chunks or [])
     chunk_rows: List[Tuple[str, str, Optional[str], int, int, int, Optional[int], Optional[int], str, str]] = []
 
-    # Pre-build a simple lookup to map spans to scenes when needed
+    # Map spans to scenes when explicit links missing
     def _scene_id_for_span(start: int) -> Optional[str]:
         for s in scenes_norm:
             if s["start"] <= start < s["end"]:
@@ -267,9 +265,7 @@ def persist_work_and_children(
                 scene_id = _scene_id_for_span(c_start)
 
         # Text fallback → slice from work.norm_text
-        text = getattr(c, "text", None)
-        if text is None:
-            text = _slice_safe(norm_text, c_start, c_end)
+        text = getattr(c, "text", None) or _slice_safe(norm_text, c_start, c_end)
 
         cid = _uuid()
         chunk_rows.append(
@@ -298,3 +294,88 @@ def persist_work_and_children(
 
     conn.commit()
     return work_id
+
+
+# --- Atomic resegment (replace scenes+chunks only) -------------------------
+
+def replace_scenes_and_chunks(
+    conn: sqlite3.Connection,
+    *,
+    work_id: str,
+    norm_text: str,
+    scenes: Iterable[Any],   # same shape as for ingest
+    chunks: Iterable[Any],   # same shape as for ingest
+) -> None:
+    """
+    Atomically replace scenes/chunks for an existing work (norm_text unchanged).
+    """
+    cur = conn.execute("SELECT id FROM work WHERE id = ?", (work_id,)).fetchone()
+    if not cur:
+        raise ValueError(f"Unknown work_id: {work_id}")
+
+    conn.execute("BEGIN IMMEDIATE;")
+    try:
+        conn.execute("DELETE FROM chunk WHERE work_id = ?", (work_id,))
+        conn.execute("DELETE FROM scene WHERE work_id = ?", (work_id,))
+
+        # Normalize scenes
+        scenes_raw = list(scenes or [])
+        scenes_norm: List[Dict[str, Any]] = []
+        for i, s in enumerate(scenes_raw):
+            s_idx = getattr(s, "idx", i)
+            s_start = getattr(s, "start", 0)
+            s_end = getattr(s, "end", s_start)
+            s_heading = getattr(s, "heading", None)
+            scenes_norm.append(
+                {"idx": int(s_idx), "start": int(s_start), "end": int(s_end), "heading": s_heading}
+            )
+        scenes_norm.sort(key=lambda x: (x["idx"], x["start"]))
+
+        scene_id_by_idx: Dict[int, str] = {}
+        if scenes_norm:
+            scene_rows: List[Tuple[str, str, Optional[str], int, int, int, Optional[str]]] = []
+            for s in scenes_norm:
+                sid = _uuid()
+                scene_id_by_idx[s["idx"]] = sid
+                scene_rows.append((sid, work_id, None, s["idx"], s["start"], s["end"], s["heading"]))
+            conn.executemany(
+                "INSERT INTO scene (id, work_id, chapter_id, idx, char_start, char_end, heading) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                scene_rows,
+            )
+
+        # Normalize chunks
+        def _scene_id_for_span(start: int) -> Optional[str]:
+            for s in scenes_norm:
+                if s["start"] <= start < s["end"]:
+                    return scene_id_by_idx.get(s["idx"])
+            return None
+
+        chunk_rows: List[Tuple[str, str, Optional[str], int, int, int, Optional[int], Optional[int], str, str]] = []
+        for i, c in enumerate(list(chunks or [])):
+            c_idx = getattr(c, "idx", i)
+            c_start = int(getattr(c, "start"))
+            c_end = int(getattr(c, "end"))
+
+            scene_id: Optional[str] = getattr(c, "scene_id", None)
+            if scene_id is None:
+                c_scene_idx = getattr(c, "scene_idx", None)
+                if isinstance(c_scene_idx, int) and c_scene_idx in scene_id_by_idx:
+                    scene_id = scene_id_by_idx[c_scene_idx]
+                else:
+                    scene_id = _scene_id_for_span(c_start)
+
+            text = getattr(c, "text", None) or _slice_safe(norm_text, c_start, c_end)
+            chunk_rows.append((_uuid(), work_id, scene_id, int(c_idx), c_start, c_end, None, None, text, _sha256_text(text)))
+
+        if chunk_rows:
+            conn.executemany(
+                "INSERT INTO chunk (id, work_id, scene_id, idx, char_start, char_end, token_start, token_end, text, sha256) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                chunk_rows,
+            )
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
