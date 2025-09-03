@@ -27,3 +27,5 @@ nats-py>=2.7
 python-multipart>=0.0.9   # already added for file uploads
 
 prometheus_client>=0.20
+
+mcp>=0.1.4

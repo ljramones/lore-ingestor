@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "lore-ingestor": {
+      "command": "/opt/anaconda3/bin/python",
+      "args": ["-m", "mcp_server.server"],
+      "cwd": "/Users/larrymitchell/ML/writer-agents/Lore-Ingestor",
+      "env": {
+        "LORE_INGEST_URL": "http://127.0.0.1:8099"
+      }
+    }
+  }
+}

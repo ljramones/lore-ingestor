@@ -1,5 +1,5 @@
 networks:
-  guidehouse-network:
+  ingest-network:
     name: ingest-network
     driver: bridge
 
@@ -10,7 +10,7 @@ services:
       POSTGRES_USER: temporal
       POSTGRES_PASSWORD: temporal
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U temporal"]
+      test: [ "CMD-SHELL", "pg_isready -U temporal" ]
       interval: 5s
       timeout: 5s
       retries: 20
@@ -19,30 +19,47 @@ services:
 
   temporal:
     image: temporalio/auto-setup:latest
+    container_name: lore-ingestor-temporal
     environment:
-      DB: postgresql
+      DB: postgres12
       DB_PORT: 5432
       POSTGRES_SEEDS: postgres
       POSTGRES_USER: temporal
       POSTGRES_PWD: temporal
       POSTGRES_DB: temporal
-      DYNAMIC_CONFIG_FILE_PATH: /etc/temporal/dynamicconfig/temporal.yaml
+      # DYNAMIC_CONFIG_FILE_PATH can be set later when you have a file
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "7233:7233"
-    volumes:
-      - ./temporal/dynamicconfig:/etc/temporal/dynamicconfig
+    networks:
+      - ingest-network
+
+  temporal-ui:
+    image: temporalio/ui:latest
+    environment:
+      TEMPORAL_ADDRESS: lore-ingestor-temporal:7233
+    ports:
+      - "8233:8080"
+    depends_on:
+      - temporal
     networks:
       - ingest-network
 
   temporal-worker:
     build: .
     container_name: lore-ingestor-temporal-worker
-    command: [ "python", "-m", "service.temporal_worker" ]
+    command: [ "python", "-m", "service.wait_for_temporal" ]
+    restart: unless-stopped
     environment:
       DB_PATH: /app/data/tropes.db
-      TEMPORAL_TARGET: "temporal:7233"
+      TEMPORAL_TARGET: "lore-ingestor-temporal:7233"
       TEMPORAL_NAMESPACE: "default"
       TEMPORAL_TASK_QUEUE: "ingest-queue"
+      # optional wait knobs:
+      # WAITER_ATTEMPTS: "90"
+      # WAITER_SLEEP_SECONDS: "2"
     volumes:
       - ./lore_ingest:/app/lore_ingest:ro
       - ./service:/app/service:ro
@@ -53,19 +70,6 @@ services:
     networks:
       - ingest-network
 
-  temporal-ui:
-    image: temporalio/ui:latest
-    environment:
-      TEMPORAL_ADDRESS: temporal:7233
-    ports:
-      - "8233:8080"
-    depends_on:
-      - temporal
-    networks:
-      - ingest-network
-
-
-  # add these services if you want to use Redis/NATS sinks
   redis:
     image: redis:7
     ports:
@@ -75,42 +79,41 @@ services:
 
   nats:
     image: nats:2
-    command: [ "-js" ]   # enable JetStream (optional)
+    command: [ "-js" ]
     ports:
       - "4222:4222"
     networks:
       - ingest-network
 
-
   pushgateway:
     image: prom/pushgateway:v1.7.0
+    command: [ "--web.listen-address=:9091" ]
     ports:
       - "9091:9091"
-    command: [ "--web.listen-address=:9091" ]
     networks:
       - ingest-network
 
   http:
     build: .
     container_name: lore-ingestor-http
+    command: [ "uvicorn", "service.http_app:app", "--host", "0.0.0.0", "--port", "8099" ]
     environment:
       DB_PATH: /app/data/tropes.db
       INBOX: /app/inbox
       SUCCESS_DIR: /app/success
       FAIL_DIR: /app/fail
-      # ---- events config ----
-      EMIT_SINK: "stdout,redis,nats"   # any combo of stdout|http|redis|nats
-      EMIT_HTTP_URL: "http://host.docker.internal:9000/webhook"  # if using http
+      EMIT_SINK: "stdout,redis,nats"
+      EMIT_HTTP_URL: "http://host.docker.internal:9000/webhook"
       EMIT_REDIS_URL: "redis://redis:6379/0"
       EMIT_REDIS_LIST: "ingest_events"
       EMIT_NATS_URL: "nats://nats:4222"
       EMIT_NATS_SUBJECT: "ingest.events"
       PUSHGATEWAY_URL: "http://pushgateway:9091"
-      PUSHGATEWAY_JOB: "lore-ingest-http"   # for http service; use lore-ingest-watcher for watcher, etc.
-      PUSHGATEWAY_INSTANCE: "${HOSTNAME}"   # optional, becomes grouping key
-      PUSHGATEWAY_MODE: "pushadd"           # default: pushadd
+      PUSHGATEWAY_JOB: "lore-ingest-http"
+      PUSHGATEWAY_INSTANCE: "${HOSTNAME:-lore-ingestor-http}"
+      PUSHGATEWAY_MODE: "pushadd"
       TEMPORAL_ENABLED: "true"
-      TEMPORAL_TARGET: "temporal:7233"
+      TEMPORAL_TARGET: "lore-ingestor-temporal:7233"
       TEMPORAL_NAMESPACE: "default"
       TEMPORAL_TASK_QUEUE: "ingest-queue"
     volumes:
@@ -123,12 +126,11 @@ services:
       - ./fail:/app/fail
     ports:
       - "8099:8099"
-    command: [ "uvicorn", "service.http_app:app", "--host", "0.0.0.0", "--port", "8099" ]
     depends_on:
-      - redis
-      - nats
       - temporal
       - temporal-worker
+      - redis
+      - nats
     restart: unless-stopped
     networks:
       - ingest-network
@@ -136,6 +138,7 @@ services:
   watcher:
     build: .
     container_name: lore-ingestor-watcher
+    command: [ "python", "-m", "cli.main", "watch" ]
     environment:
       DB_PATH: /app/data/tropes.db
       INBOX: /app/inbox
@@ -144,7 +147,6 @@ services:
       ALLOWED_EXT: ".txt,.md,.pdf,.docx"
       MAX_FILE_MB: "20"
       INGEST_PROFILE: "pdf_pages"
-      # ---- events config ----
       EMIT_SINK: "stdout,redis,nats"
       EMIT_HTTP_URL: "http://host.docker.internal:9000/webhook"
       EMIT_REDIS_URL: "redis://redis:6379/0"
@@ -152,7 +154,8 @@ services:
       EMIT_NATS_URL: "nats://nats:4222"
       EMIT_NATS_SUBJECT: "ingest.events"
       PUSHGATEWAY_URL: "http://pushgateway:9091"
-      PUSHGATEWAY_JOB: "lore-ingest-watcher"   # for http service; use lore-ingest-watcher for watcher, etc.
+      PUSHGATEWAY_JOB: "lore-ingest-watcher"
+      PUSHGATEWAY_INSTANCE: "${HOSTNAME:-lore-ingestor-watcher}"
     volumes:
       - ./lore_ingest:/app/lore_ingest:ro
       - ./service:/app/service:ro
@@ -161,7 +164,6 @@ services:
       - ./inbox:/app/inbox
       - ./success:/app/success
       - ./fail:/app/fail
-    command: [ "python", "-m", "cli.main", "watch" ]
     depends_on:
       - http
       - redis
@@ -169,22 +171,3 @@ services:
     restart: unless-stopped
     networks:
       - ingest-network
-
-
-
-  # optional: only run if you actually want the Temporal worker in Docker
-  worker:
-    build:
-      context: .
-      target: worker     # 👈 worker stage
-    environment:
-      DB_PATH: /app/data/tropes.db
-      TEMPORAL_TARGET: "temporal:7233"
-      TEMPORAL_NAMESPACE: default
-      INGEST_TASK_QUEUE: ingest-queue
-    volumes:
-      - ./data:/app/data
-    restart: unless-stopped
-    networks:
-      - ingest-network
-

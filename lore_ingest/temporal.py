@@ -5,16 +5,20 @@ import os
 from pathlib import Path
 from typing import Optional, Dict, Any
 
+
+import asyncio
 from temporalio import activity, workflow
 
 from lore_ingest.api import ingest_file
 from lore_ingest.persist import open_db
 
 
+
+
 # ---------------- Activities (dict inputs; NO keyword-only args) ----------------
 
 @activity.defn(name="IngestActivity")
-def ingest_activity(params: Dict[str, Any]) -> Dict[str, Any]:
+async def ingest_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     """
     params: {
       "path": str,
@@ -24,18 +28,26 @@ def ingest_activity(params: Dict[str, Any]) -> Dict[str, Any]:
       "profile": Optional[str]
     }
     """
-    path    = str(params.get("path"))
-    title   = params.get("title")
-    author  = params.get("author")
+    path = str(params.get("path"))
+    title = params.get("title")
+    author = params.get("author")
     db_path = params.get("db_path") or os.getenv("DB_PATH", "./tropes.db")
     profile = params.get("profile")
 
-    res = ingest_file(path=Path(path).as_posix(), title=title, author=author, db_path=db_path, profile=profile)
+    # Run the blocking ingest_file in a thread
+    res = await asyncio.to_thread(
+        ingest_file,
+        path=Path(path).as_posix(),
+        title=title,
+        author=author,
+        db_path=db_path,
+        profile=profile
+    )
     return {"work_id": res.work_id, "content_sha1": res.content_sha1, "sizes": res.sizes}
 
 
 @activity.defn(name="GetSummaryActivity")
-def get_summary_activity(params: Dict[str, Any]) -> Dict[str, Any]:
+async def get_summary_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     """
     params: {
       "work_id": str,
@@ -45,17 +57,21 @@ def get_summary_activity(params: Dict[str, Any]) -> Dict[str, Any]:
     work_id = str(params.get("work_id"))
     db_path = params.get("db_path") or os.getenv("DB_PATH", "./tropes.db")
 
-    conn = open_db(db_path)
-    try:
-        row = conn.execute("SELECT COALESCE(char_count,0) AS chars FROM work WHERE id = ?", (work_id,)).fetchone()
-        if not row:
-            return {"work_id": work_id, "chars": 0, "scenes": 0, "chunks": 0}
-        chars = int(row["chars"] or 0)
-        scenes = conn.execute("SELECT COUNT(*) FROM scene WHERE work_id = ?", (work_id,)).fetchone()[0]
-        chunks = conn.execute("SELECT COUNT(*) FROM chunk WHERE work_id = ?", (work_id,)).fetchone()[0]
-        return {"work_id": work_id, "chars": chars, "scenes": scenes, "chunks": chunks}
-    finally:
-        conn.close()
+    def _get_summary():
+        conn = open_db(db_path)
+        try:
+            row = conn.execute("SELECT COALESCE(char_count,0) AS chars FROM work WHERE id = ?", (work_id,)).fetchone()
+            if not row:
+                return {"work_id": work_id, "chars": 0, "scenes": 0, "chunks": 0}
+            chars = int(row["chars"] or 0)
+            scenes = conn.execute("SELECT COUNT(*) FROM scene WHERE work_id = ?", (work_id,)).fetchone()[0]
+            chunks = conn.execute("SELECT COUNT(*) FROM chunk WHERE work_id = ?", (work_id,)).fetchone()[0]
+            return {"work_id": work_id, "chars": chars, "scenes": scenes, "chunks": chunks}
+        finally:
+            conn.close()
+
+    # Run the database operations in a thread
+    return await asyncio.to_thread(_get_summary)
 
 
 # ---------------- Workflows ----------------
