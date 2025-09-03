@@ -1,0 +1,36 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+.venv*/
+.env
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# macOS & editors
+.DS_Store
+.idea/
+.vscode/
+
+# SQLite & runtime artifacts
+*.db
+*.db-*
+/data/
+/inbox/
+/success/
+/fail/
+/reports/
+
+# Docker / build
+*.log
+dist/
+build/
+.eggs/
+
+# Temporal dynamic config if not used
+temporal/dynamicconfig/*
+!temporal/dynamicconfig/.gitkeep
